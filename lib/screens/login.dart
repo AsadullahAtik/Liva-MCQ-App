@@ -23,6 +23,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _code = TextEditingController();
   bool _register = false;
   bool _busy = false;
+  bool _discovering = false;
   String? _error;
   List<Map<String, dynamic>> _classes = [];
   int? _classId;
@@ -53,6 +54,20 @@ class _LoginScreenState extends State<LoginScreen> {
     } on ApiError catch (e) {
       if (mounted) setState(() => _error = e.message);
     }
+  }
+
+  Future<void> _discover() async {
+    setState(() => _discovering = true);
+    final found = await Api.discover();
+    if (!mounted) return;
+    if (found != null) {
+      await Api.setBase(found);
+      _server.text = found;
+      toast(context, '✅ Server পাওয়া গেছে: $found');
+    } else {
+      toast(context, '❌ Network-এ কোনো server পাওয়া যায়নি');
+    }
+    setState(() => _discovering = false);
   }
 
   Future<void> _submit() async {
@@ -210,6 +225,21 @@ class _LoginScreenState extends State<LoginScreen> {
                             toast(context, 'সংরক্ষিত: ${Api.baseUrl}');
                           }
                         },
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _discovering ? null : _discover,
+                          icon: _discovering
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.search),
+                          label: Text(_discovering ? 'খোঁজা হচ্ছে...' : '🔍 Server স্বয়ংক্রিয়ভাবে খুঁজুন'),
+                        ),
                       ),
                     ],
                   ),
