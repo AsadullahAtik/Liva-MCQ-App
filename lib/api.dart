@@ -15,7 +15,7 @@ class ApiError implements Exception {
 /// সার্ভারের REST API. টোকেন ও সার্ভার ঠিকানা ফোনে সংরক্ষিত থাকে.
 class Api {
   /// Android emulator থেকে কম্পিউটারের localhost = 10.0.2.2. আসল ফোনে কম্পিউটারের IP দিতে হবে.
-  static String baseUrl = 'http://10.0.2.2:8080';
+  static String baseUrl = 'http://192.168.1.110:8080';
   static String? token;
   static Map<String, dynamic>? user;
 
