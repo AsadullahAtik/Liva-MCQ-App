@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,7 +16,7 @@ class ApiError implements Exception {
 /// সার্ভারের REST API. টোকেন ও সার্ভার ঠিকানা ফোনে সংরক্ষিত থাকে.
 class Api {
   /// Android emulator থেকে কম্পিউটারের localhost = 10.0.2.2. আসল ফোনে কম্পিউটারের IP দিতে হবে.
-  static String baseUrl = 'http://192.168.1.110:8080';
+  static String baseUrl = 'http://192.168.137.1:8080';
   static String? token;
   static Map<String, dynamic>? user;
 
@@ -177,4 +178,38 @@ class Api {
   static Future<void> setTeacherClasses(int id, List<int> classIds) =>
       _send('PUT', '/api/admin/teachers/$id/classes', body: {'classIds': classIds});
   static Future<void> deleteTeacher(int id) => _send('DELETE', '/api/admin/teachers/$id');
+
+  // ---------- Auto-discovery ----------
+  /// Local network scan করে Live MCQ server খুঁজে বের করে।
+  /// পাওয়া গেলে URL return করে, না পেলে null।
+  static Future<String?> discover() async {
+    try {
+      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback) continue;
+          final parts = addr.address.split('.');
+          if (parts.length != 4) continue;
+          final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
+
+          // সব IP একসাথে parallel-এ চেক করে (দ্রুত)
+          final futures = List.generate(254, (i) async {
+            final ip = '$subnet.${i + 1}';
+            try {
+              final res = await http
+                  .get(Uri.parse('http://$ip:8080/api/health'))
+                  .timeout(const Duration(milliseconds: 600));
+              if (res.statusCode == 200) return 'http://$ip:8080';
+            } catch (_) {}
+            return null;
+          });
+
+          final results = await Future.wait(futures);
+          final found = results.whereType<String>().firstOrNull;
+          if (found != null) return found;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
 }
