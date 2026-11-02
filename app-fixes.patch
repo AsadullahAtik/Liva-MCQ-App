@@ -1,0 +1,49 @@
+diff --git a/lib/screens/exam.dart b/lib/screens/exam.dart
+index 8af4470..3016846 100644
+--- a/lib/screens/exam.dart
++++ b/lib/screens/exam.dart
+@@ -66,10 +66,10 @@ class _ExamScreenState extends State<ExamScreen> with WidgetsBindingObserver {
+       _qs = (r['questions'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+       final saved = (r['answers'] as List?)?.map((e) => (e as num).toInt()).toList() ?? [];
+       _answers = List<int>.generate(_qs.length, (i) => i < saved.length ? saved[i] : -1);
+-      _recalc();
+-      _tick = Timer.periodic(const Duration(seconds: 1), (_) => _recalc());
+       if (!mounted) return;
+       setState(() => _loading = false);
++      _recalc(); // _loading=false হওয়ার পরে, নইলে প্রথম সেকেন্ডে 00:00 দেখায়
++      _tick = Timer.periodic(const Duration(seconds: 1), (_) => _recalc());
+     } on ApiError catch (e) {
+       if (!mounted) return;
+       setState(() {
+@@ -171,7 +171,22 @@ class _ExamScreenState extends State<ExamScreen> with WidgetsBindingObserver {
+     final q = _qs[_idx];
+     final opts = (q['options'] as List).map((e) => '$e').toList();
+     final low = _left <= 60;
+-    return Scaffold(
++    return PopScope(
++      canPop: _done,
++      onPopInvokedWithResult: (didPop, _) async {
++        if (didPop) return;
++        final leave = await confirm(
++          context,
++          'পরীক্ষা থেকে বের হবেন?',
++          'সময় চলতেই থাকবে এবং শেষ হলে সার্ভার আপনার সংরক্ষিত উত্তর নিজেই জমা করে নেবে।',
++          ok: 'বের হন',
++        );
++        if (leave && mounted) {
++          await _flush();
++          if (mounted) Navigator.of(context).pop(false);
++        }
++      },
++      child: Scaffold(
+       appBar: AppBar(
+         title: Text('${widget.exam['title']}', style: const TextStyle(fontSize: 16)),
+         actions: [
+@@ -268,6 +283,7 @@ class _ExamScreenState extends State<ExamScreen> with WidgetsBindingObserver {
+           ),
+         ]),
+       ),
++      ),
+     );
+   }
+ }

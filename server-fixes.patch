@@ -1,0 +1,251 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..8f5831f
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,16 @@
++# build
++target/
++# লোকাল ডাটাবেস (ছাত্রের তথ্য ও পাসওয়ার্ড hash থাকে — কখনো commit নয়)
++data/
++*.mv.db
++*.lock.db
++*.trace.db
++# লগ ও টেস্ট রিপোর্ট
++*.log
++report.txt
++# গোপন কথা
++.env
++# IDE
++.idea/
++*.iml
++.vscode/
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 5c646ba..069b39c 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -28,7 +28,7 @@ services:
+       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/livemcq
+       SPRING_DATASOURCE_USERNAME: livemcq
+       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-livemcq}
+-      JWT_SECRET: ${JWT_SECRET:-change-this-secret-key-to-at-least-32-chars-long}
++      JWT_SECRET: ${JWT_SECRET:?.env ফাইলে JWT_SECRET দিন (কমপক্ষে ৩২ অক্ষর)}
+       # আসল ব্যবহারে ডেমো অ্যাকাউন্ট নেই; admin-এর পাসওয়ার্ড ও (ঐচ্ছিক) নিবন্ধন কোড .env থেকে
+       APP_SEED_DEMO: ${APP_SEED_DEMO:-false}
+       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?.env ফাইলে ADMIN_PASSWORD দিন (কমপক্ষে ৬ অক্ষর)}
+diff --git a/src/main/java/com/livemcq/SecretsCheck.java b/src/main/java/com/livemcq/SecretsCheck.java
+new file mode 100644
+index 0000000..f0cb7d1
+--- /dev/null
++++ b/src/main/java/com/livemcq/SecretsCheck.java
+@@ -0,0 +1,44 @@
++package com.livemcq;
++
++import jakarta.annotation.PostConstruct;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.core.env.Environment;
++import org.springframework.core.env.Profiles;
++import org.springframework.stereotype.Component;
++
++/**
++ * চালুর সময় JWT secret যাচাই. ডিফল্ট (গিটহাবে খোলা) secret দিয়ে যে কেউ admin টোকেন বানাতে পারে.
++ * postgres প্রোফাইলে বা app.security.strict=true হলে ডিফল্ট secret থাকলে সার্ভার চালুই হয় না;
++ * লোকাল H2 ডেভেলপমেন্টে শুধু সতর্কবার্তা দেয়.
++ */
++@Component
++public class SecretsCheck {
++    static final String DEFAULT_SECRET = "change-this-secret-key-to-at-least-32-chars-long";
++    private static final Logger log = LoggerFactory.getLogger(SecretsCheck.class);
++
++    private final String secret;
++    private final boolean strict;
++    private final boolean demo;
++
++    public SecretsCheck(Environment env,
++                        @Value("${app.jwt.secret}") String secret,
++                        @Value("${app.security.strict:false}") boolean strictFlag,
++                        @Value("${app.seed.demo:true}") boolean demo) {
++        this.secret = secret;
++        this.strict = strictFlag || env.acceptsProfiles(Profiles.of("postgres"));
++        this.demo = demo;
++    }
++
++    @PostConstruct
++    void verify() {
++        if (DEFAULT_SECRET.equals(secret)) {
++            if (strict) throw new IllegalStateException("JWT_SECRET দেওয়া হয়নি: ডিফল্ট secret দিয়ে production চালানো যাবে না (কমপক্ষে ৩২ অক্ষরের নিজস্ব secret দিন)");
++            log.warn("⚠ ডিফল্ট JWT secret ব্যবহার হচ্ছে — শুধু লোকাল ডেভেলপমেন্টে চলবে. deploy-এর আগে JWT_SECRET দিন.");
++        }
++        if (demo && strict) {
++            log.warn("⚠ app.seed.demo=true: ডেমো অ্যাকাউন্ট (admin/admin ইত্যাদি) চালু আছে — আসল ব্যবহারে APP_SEED_DEMO=false দিন.");
++        }
++    }
++}
+diff --git a/src/main/java/com/livemcq/service/AuthService.java b/src/main/java/com/livemcq/service/AuthService.java
+index 1c28d6b..d7622df 100644
+--- a/src/main/java/com/livemcq/service/AuthService.java
++++ b/src/main/java/com/livemcq/service/AuthService.java
+@@ -16,6 +16,7 @@ public class AuthService {
+     private final ClassRepo classes;
+     private final JwtService jwt;
+     private final BCryptPasswordEncoder enc = new BCryptPasswordEncoder();
++    private final LoginThrottle throttle = new LoginThrottle();
+ 
+     /** খালি = যে কেউ নিবন্ধন করতে পারে; দিলে নিবন্ধনে এই কোড লাগবে (app.registration.code / REGISTRATION_CODE). */
+     @Value("${app.registration.code:}")
+@@ -33,8 +34,14 @@ public class AuthService {
+ 
+     public LoginRes login(LoginReq r) {
+         if (r == null || r.roll() == null || r.password() == null) throw new ApiException(400, "রোল ও পাসওয়ার্ড দিন");
+-        AppUser u = users.findByRoll(r.roll().trim()).orElse(null);
+-        if (u == null || !enc.matches(r.password(), u.passwordHash)) throw new ApiException(401, "রোল বা পাসওয়ার্ড ভুল");
++        String roll = r.roll().trim();
++        throttle.check(roll);
++        AppUser u = users.findByRoll(roll).orElse(null);
++        if (u == null || !enc.matches(r.password(), u.passwordHash)) {
++            throttle.fail(roll);
++            throw new ApiException(401, "রোল বা পাসওয়ার্ড ভুল");
++        }
++        throttle.success(roll);
+         return new LoginRes(jwt.create(u), toDto(u));
+     }
+ 
+diff --git a/src/main/java/com/livemcq/service/LoginThrottle.java b/src/main/java/com/livemcq/service/LoginThrottle.java
+new file mode 100644
+index 0000000..812c0c3
+--- /dev/null
++++ b/src/main/java/com/livemcq/service/LoginThrottle.java
+@@ -0,0 +1,69 @@
++package com.livemcq.service;
++
++import com.livemcq.web.ApiException;
++import java.time.Duration;
++import java.util.Iterator;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.function.LongSupplier;
++
++/**
++ * লগইনে পরপর ভুল পাসওয়ার্ড ঠেকানো (brute-force). এক রোলে {@code maxFails} বার ভুল হলে {@code lockFor} সময় লগইন বন্ধ (৪২৯).
++ * সফল লগইনে গণনা মুছে যায়. মেমরিতে থাকে, তাই এক instance-এর জন্য; একাধিক instance হলে Redis/DB-তে নিতে হবে.
++ */
++public class LoginThrottle {
++    private record State(int fails, long lockedUntil, long lastFail) {}
++
++    private static final int MAX_KEYS = 50_000;
++
++    private final int maxFails;
++    private final long lockMs;
++    private final LongSupplier clock;
++    private final Map<String, State> map = new ConcurrentHashMap<>();
++
++    public LoginThrottle() {
++        this(5, Duration.ofMinutes(15), System::currentTimeMillis);
++    }
++
++    public LoginThrottle(int maxFails, Duration lockFor, LongSupplier clock) {
++        this.maxFails = maxFails;
++        this.lockMs = lockFor.toMillis();
++        this.clock = clock;
++    }
++
++    /** তালাবন্ধ থাকলে ৪২৯ ছোঁড়ে. */
++    public void check(String key) {
++        State s = map.get(norm(key));
++        long now = clock.getAsLong();
++        if (s != null && s.lockedUntil() > now) {
++            long mins = Math.max(1, (s.lockedUntil() - now + 59_999) / 60_000);
++            throw new ApiException(429, "অনেকবার ভুল হয়েছে, " + mins + " মিনিট পরে চেষ্টা করুন");
++        }
++    }
++
++    public void fail(String key) {
++        long now = clock.getAsLong();
++        if (map.size() >= MAX_KEYS) prune(now);
++        map.merge(norm(key), new State(1, 0, now), (old, ignored) -> {
++            // লক শেষ হয়ে গেলে বা অনেকদিন আগের ভুল হলে নতুন করে গোনা
++            boolean stale = old.lockedUntil() != 0 ? old.lockedUntil() <= now : now - old.lastFail() > lockMs;
++            int n = stale ? 1 : old.fails() + 1;
++            return new State(n, n >= maxFails ? now + lockMs : 0, now);
++        });
++    }
++
++    public void success(String key) {
++        map.remove(norm(key));
++    }
++
++    private void prune(long now) {
++        for (Iterator<State> it = map.values().iterator(); it.hasNext(); ) {
++            State s = it.next();
++            if (s.lockedUntil() <= now && now - s.lastFail() > lockMs) it.remove();
++        }
++    }
++
++    private static String norm(String k) {
++        return k == null ? "" : k.trim().toLowerCase();
++    }
++}
+diff --git a/src/main/resources/application.properties b/src/main/resources/application.properties
+index fdde5fd..12c2eab 100644
+--- a/src/main/resources/application.properties
++++ b/src/main/resources/application.properties
+@@ -23,3 +23,6 @@ app.registration.code=${REGISTRATION_CODE:}
+ # true = ডেমো ছাত্র/শিক্ষক/পরীক্ষা (admin/admin, t1/1234, 101/1234 ...). আসল ব্যবহারে false দিন এবং ADMIN_PASSWORD দিন.
+ app.seed.demo=${APP_SEED_DEMO:true}
+ app.admin.password=${ADMIN_PASSWORD:}
++
++# true = ডিফল্ট JWT secret থাকলে সার্ভার চালু হবে না (postgres প্রোফাইলে সবসময় এমন). environment: APP_SECURITY_STRICT
++app.security.strict=${APP_SECURITY_STRICT:false}
+diff --git a/src/test/java/com/livemcq/service/LoginThrottleTest.java b/src/test/java/com/livemcq/service/LoginThrottleTest.java
+new file mode 100644
+index 0000000..e18a2fe
+--- /dev/null
++++ b/src/test/java/com/livemcq/service/LoginThrottleTest.java
+@@ -0,0 +1,45 @@
++package com.livemcq.service;
++
++import static org.junit.jupiter.api.Assertions.*;
++
++import com.livemcq.web.ApiException;
++import java.time.Duration;
++import org.junit.jupiter.api.Test;
++
++class LoginThrottleTest {
++    private long t = 0;
++    private final LoginThrottle l = new LoginThrottle(5, Duration.ofMinutes(15), () -> t);
++
++    private boolean locked(String k) {
++        try {
++            l.check(k);
++            return false;
++        } catch (ApiException e) {
++            assertEquals(429, e.status);
++            return true;
++        }
++    }
++
++    @Test
++    void locksAfterFiveFailuresAndUnlocksLater() {
++        for (int i = 0; i < 4; i++) {
++            l.fail("101");
++            assertFalse(locked("101"));
++        }
++        l.fail(" 101 "); // ফাঁকা অংশ ধর্তব্য নয়
++        assertTrue(locked("101"));
++        assertFalse(locked("102"), "অন্য রোল আটকাবে না");
++        t += 14 * 60_000;
++        assertTrue(locked("101"));
++        t += 2 * 60_000;
++        assertFalse(locked("101"));
++    }
++
++    @Test
++    void successResetsCount() {
++        for (int i = 0; i < 4; i++) l.fail("101");
++        l.success("101");
++        for (int i = 0; i < 4; i++) l.fail("101");
++        assertFalse(locked("101"));
++    }
++}
